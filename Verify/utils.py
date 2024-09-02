@@ -1,5 +1,7 @@
 from django.core.mail import send_mail
 from django.conf import settings
+from django.contrib.auth.tokens import PasswordResetTokenGenerator  
+import six
 import random
 import string
 
@@ -15,10 +17,6 @@ def send_otp(email, otp):
     )
 
 
-
-
-
-
 def send_verification_email(email, token, reset=False):
     subject = 'Verify Your Email' if not reset else 'Reset Your Password'
     message = f'Click the link to verify your email: {settings.FRONTEND_URL}/verify-email/{token}' \
@@ -30,8 +28,7 @@ def generate_verification_token():
     return ''.join(random.choices(string.ascii_letters + string.digits, k=20))
 
 
-from django.contrib.auth.tokens import PasswordResetTokenGenerator  
-import six
+
 
 class TokenGenerator(PasswordResetTokenGenerator):  
     def _make_hash_value(self, user, timestamp):  

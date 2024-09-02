@@ -1,4 +1,3 @@
-# myapp/middleware.py
 from django.http import JsonResponse, HttpResponse
 from django.template.response import TemplateResponse
 from django.utils.deprecation import MiddlewareMixin
