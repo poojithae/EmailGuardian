@@ -39,5 +39,6 @@ urlpatterns = [
     path('token/', jwt_views.TokenObtainPairView.as_view(), name='token_obtain_pair'),
     path('token/refresh/', jwt_views.TokenRefreshView.as_view(), name='token_refresh'),
     path('export-csv/', UserCSVExportView.as_view(), name='export-csv'),
+    #path('profile/', profile_view, name='profile_view'),
     
 ]

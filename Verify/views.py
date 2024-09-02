@@ -59,7 +59,7 @@ class RegisterViewSet(viewsets.ViewSet):
     def create(self, request):
         serializer = UserRegistrationSerializer(data=request.data)
         if serializer.is_valid():
-            user, otp = serializer.save()  # Get user and OTP from serializer
+            user, otp = serializer.save()  
             self.save_otp(user.email, otp)
             self.send_otp_email(user.username, user.email, otp)
             return Response({'message': 'Registration successful. OTP has been sent to your email.'}, status=status.HTTP_201_CREATED)
@@ -192,13 +192,17 @@ class RegenerateOTPViewSet(viewsets.ViewSet):
 
 
 class LoginViewSet(viewsets.ViewSet):
+    permission_classes = (AllowAny,)
+    serializer_class = UserRegistrationSerializer
+
     def create(self, request):
         serializer = UserRegistrationSerializer(data=request.data)
+
         if serializer.is_valid():
             email = serializer.validated_data.get("email")
             password = serializer.validated_data.get("password")
-
             user = authenticate(email=email, password=password)
+
             if user is not None:
                 refresh = RefreshToken.for_user(user)
                 return Response({
@@ -214,7 +218,7 @@ class LoginViewSet(viewsets.ViewSet):
 
 
 class LogoutViewSet(viewsets.ViewSet):
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated,]
 
     def create(self, request):
         try:
@@ -233,8 +237,11 @@ class LogoutViewSet(viewsets.ViewSet):
             return Response({"detail": str(e)}, status=status.HTTP_400_BAD_REQUEST)
 
 class PasswordResetRequestViewSet(viewsets.ViewSet):
+    permission_classes = (AllowAny,)
+
     def create(self, request):
         serializer = PasswordResetRequestSerializer(data=request.data)
+
         if serializer.is_valid():
             email = serializer.validated_data['email']
             try:
@@ -266,6 +273,8 @@ class PasswordResetRequestViewSet(viewsets.ViewSet):
 
 
 class PasswordResetConfirmViewSet(viewsets.ViewSet):
+    permission_classes = (AllowAny,)
+
     def create(self, request):
         serializer = PasswordResetConfirmSerializer(data=request.data)
         if serializer.is_valid():
@@ -398,7 +407,6 @@ class UserCSVExportView(APIView):
                 ])
         
         return Response({"message": f"CSV file '{file_name}' has been created successfully."}, status=status.HTTP_200_OK)
-        
 
 
 class EmailVerificationViewSet(viewsets.ViewSet):
