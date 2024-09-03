@@ -10,17 +10,16 @@ from django.core.mail import send_mail
 from rest_framework import viewsets, status
 from rest_framework.response import Response
 from rest_framework.views import APIView
-from .models import UserModel, EmailVerification
+from .models import UserModel, PasswordResetCode, EmailChangeCode
 from .serializers import (
     UserRegistrationSerializer, 
     #LoginSerializer,
     VerifyOTPSerializer,
-    PasswordResetRequestSerializer,
-    PasswordResetConfirmSerializer,
-    EmailChangeSerializer,
+    PasswordResetSerializer,
+    PasswordResetVerifiedSerializer,
     PasswordChangeSerializer,
-    UserSerializer,
-    EmailVerificationSerializer,
+    EmailChangeSerializer,
+    #EmailChangeVerifySerializer
 )
 from django.contrib.auth import get_user_model
 from django.utils.translation import gettext as _
@@ -30,6 +29,8 @@ from rest_framework_simplejwt.exceptions import TokenError
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.pagination import PageNumberPagination
 from django_filters import rest_framework as filters
+from rest_framework.throttling import UserRateThrottle
+from django.core.cache import cache
 
 
 
@@ -47,6 +48,10 @@ class UserFilter(filters.FilterSet):
     class Meta:
         model = UserModel
         fields = ['phone_number', 'email']
+
+class BurstRateThrottle(UserRateThrottle):
+    rate = '100/minute'
+
 
 class RegisterViewSet(viewsets.ViewSet):
     queryset = UserModel.objects.filter(is_active=True)
@@ -66,24 +71,12 @@ class RegisterViewSet(viewsets.ViewSet):
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
 
-    def save_otp(self, email, otp):
-        """Save the OTP to the database for the given email"""
-        user = UserModel.objects.get(email=email)
-        EmailVerification.objects.update_or_create(
-            user=user,
-            defaults={
-                'verification_code': otp,
-                'is_verified': False,
-                'created_at': timezone.now()
-            }
-        )
-
-    def send_otp_email(self, username, email, otp):
+    def send_otp_email(self, first_name, email, otp):
         """Send OTP to the user's email"""
         verification_link = self.get_verification_link(email, otp)
         send_mail(
             'Verify Your Email Address',
-            f'Hi {username},\n\n'
+            f'Hi {first_name},\n\n'
             f'Your OTP code is {otp}. Verify your email by visiting the following link: {verification_link}',
             settings.DEFAULT_FROM_EMAIL,
             [email],
@@ -224,7 +217,7 @@ class LogoutViewSet(viewsets.ViewSet):
         try:
             refresh_token = request.data.get('refresh')
             token = RefreshToken(refresh_token)
-            token.blacklist()  # Ensure you have enabled blacklist in settings
+            token.blacklist()  
             return Response({
                 "detail": "Successfully logged out.",
                 'links': {
@@ -236,70 +229,88 @@ class LogoutViewSet(viewsets.ViewSet):
         except Exception as e:
             return Response({"detail": str(e)}, status=status.HTTP_400_BAD_REQUEST)
 
-class PasswordResetRequestViewSet(viewsets.ViewSet):
+
+class PasswordResetViewSet(viewsets.ViewSet):
     permission_classes = (AllowAny,)
+    serializer_class = PasswordResetSerializer
 
     def create(self, request):
-        serializer = PasswordResetRequestSerializer(data=request.data)
+        serializer = self.serializer_class(data=request.data)
 
         if serializer.is_valid():
             email = serializer.validated_data['email']
-            try:
-                user = UserModel.objects.get(email=email)
-            except UserModel.DoesNotExist:
-                return Response({"detail": "User with this email does not exist."}, status=status.HTTP_404_NOT_FOUND)
+            user = cache.get(f'user_{email}')
 
-            token = uuid.uuid4()
-            user.reset_password_token = token
-            user.reset_password_token_expiry = timezone.now() + datetime.timedelta(hours=1)
-            user.save()
+            if not user:
+                try:
+                    user = UserModel.objects.get(email=email)
+                    cache.set(f'user_{email}', user, timeout=60*60)  
+                except get_user_model().DoesNotExist:
+                    pass
 
-            reset_link = f"http://{settings.SITE_DOMAIN}/api/password-reset/confirm/?token={token}"
-            send_mail(
-                'Password Reset Request',
-                f'Use this link to reset your password: {reset_link}',
-                settings.DEFAULT_FROM_EMAIL,
-                [email],
-                fail_silently=False,
-            )
+            if user and user.is_verified and user.is_active:
+                PasswordResetCode.objects.filter(user=user).delete()
+                password_reset_code = PasswordResetCode.objects.create_password_reset_code(user)
+                reset_link = f"http://{settings.SITE_DOMAIN}/api/password-reset/verify/?code={password_reset_code.token}"
+                send_mail(
+                    'Password Reset Request',
+                    f'Use this link to reset your password: {reset_link}',
+                    settings.DEFAULT_FROM_EMAIL,
+                    [email],
+                    fail_silently=False,
+                )
 
-            return Response({
-                "detail": "Password reset link sent to email.",
-                'links': {
-                    'password-reset-confirm': f"http://{settings.SITE_DOMAIN}/api/password-reset-confirm/"
-                }
-            }, status=status.HTTP_200_OK)
+                return Response({'email': email}, status=status.HTTP_201_CREATED)
+
+            return Response({'detail': 'Password reset not allowed.'}, status=status.HTTP_400_BAD_REQUEST)
+
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
 
-class PasswordResetConfirmViewSet(viewsets.ViewSet):
+class PasswordResetVerifyViewSet(viewsets.ViewSet):
     permission_classes = (AllowAny,)
 
+    def retrieve(self, request):
+        token = request.GET.get('token', '')
+
+        try:
+            password_reset_code = PasswordResetCode.objects.get(token=token)
+
+            if (timezone.now() - password_reset_code.created_at).days > PasswordResetCode.objects.get_expiry_period():
+                password_reset_code.delete()
+                raise PasswordResetCode.DoesNotExist()
+
+            return Response({'success': 'Password reset code is valid.'}, status=status.HTTP_200_OK)
+
+        except PasswordResetCode.DoesNotExist:
+            return Response({'detail': 'Invalid or expired password reset code.'}, status=status.HTTP_400_BAD_REQUEST)
+
+
+class PasswordResetVerifiedViewSet(viewsets.ViewSet):
+    permission_classes = (AllowAny,)
+    serializer_class = PasswordResetVerifiedSerializer
+
     def create(self, request):
-        serializer = PasswordResetConfirmSerializer(data=request.data)
+        serializer = self.serializer_class(data=request.data)
+
         if serializer.is_valid():
             token = serializer.validated_data['token']
-            new_password = serializer.validated_data['new_password']
+            password = serializer.validated_data['password']
 
             try:
-                user = UserModel.objects.get(
-                    reset_password_token=token, 
-                    reset_password_token_expiry__gte=timezone.now()
-                )
-            except UserModel.DoesNotExist:
-                return Response({"detail": "Invalid or expired token."}, status=status.HTTP_400_BAD_REQUEST)
+                password_reset_code = PasswordResetCode.objects.get(token=token)
+                user = password_reset_code.user
+                user.set_password(password)
+                user.save()
 
-            user.set_password(new_password)
-            user.reset_password_token = None
-            user.reset_password_token_expiry = None
-            user.save()
+                # Delete password reset code just used
+                password_reset_code.delete()
 
-            return Response({
-                "detail": "Password has been reset successfully.",
-                'links': {
-                    'login': f"http://{settings.SITE_DOMAIN}/api/token/"
-                }
-            }, status=status.HTTP_200_OK)
+                return Response({'success': 'Password has been reset successfully.'}, status=status.HTTP_200_OK)
+
+            except PasswordResetCode.DoesNotExist:
+                return Response({'detail': 'Invalid or expired password reset code.'}, status=status.HTTP_400_BAD_REQUEST)
+
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
 
@@ -307,80 +318,88 @@ class EmailChangeViewSet(viewsets.ViewSet):
     permission_classes = (IsAuthenticated,)
     serializer_class = EmailChangeSerializer
 
-    def create(self, request, *args, **kwargs):
+    def create(self, request):
         serializer = self.serializer_class(data=request.data)
-        
+
         if serializer.is_valid():
             user = request.user
-            UserModel.objects.filter(user=user).delete()
             email_new = serializer.validated_data['email']
 
-            try:
-                user_with_email = get_user_model().objects.get(email=email_new)
-                if user_with_email.is_verified:
-                    return Response({'detail': _('Email address already taken.')}, status=status.HTTP_400_BAD_REQUEST)
-                else:
-                    raise get_user_model().DoesNotExist
+            EmailChangeCode.objects.filter(user=user).delete()
 
-            except get_user_model().DoesNotExist:
-                email_change_code = UserModel.objects.create_email_change_code(user, email_new)
-                email_change_code.send_email_change_emails()
+            try:
+                user_with_email = UserModel.objects.get(email=email_new)
+                if user_with_email.is_verified:
+                    return Response({'detail': 'Email address already taken.'}, status=status.HTTP_400_BAD_REQUEST)
+                else:
+                    raise UserModel.DoesNotExist
+
+            except UserModel.DoesNotExist:
+                email_change_code = EmailChangeCode.objects.create_email_change_code(user, email_new)
+                change_link = f"http://{settings.SITE_DOMAIN}/api/email-change/verify/?code={email_change_code.token}"
+                send_mail(
+                    'Email Change Request',
+                    f'Use this link to confirm your email change: {change_link}',
+                    settings.DEFAULT_FROM_EMAIL,
+                    [email_new],
+                    fail_silently=False,
+                )
+
                 return Response({'email': email_new}, status=status.HTTP_201_CREATED)
 
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
+
 class EmailChangeVerifyViewSet(viewsets.ViewSet):
     permission_classes = (AllowAny,)
 
-    def retrieve(self, request, *args, **kwargs):
-        code = request.GET.get('code', '')
+    def retrieve(self, request):
+        token = request.GET.get('token', '')
+
         try:
-            email_change_code = UserModel.objects.get(code=code)
-            delta = date.today() - email_change_code.created_at.date()
-            if delta.days > UserModel.objects.get_expiry_period():
+            email_change_code = EmailChangeCode.objects.get(token=token)
+
+            if (timezone.now() - email_change_code.created_at).days > EmailChangeCode.objects.get_expiry_period():
                 email_change_code.delete()
-                raise UserModel.DoesNotExist()
+                raise EmailChangeCode.DoesNotExist()
 
             try:
-                user_with_email = get_user_model().objects.get(email=email_change_code.email)
+                user_with_email = UserModel.objects.get(email=email_change_code.email)
                 if user_with_email.is_verified:
                     email_change_code.delete()
-                    return Response({'detail': _('Email address already taken.')}, status=status.HTTP_400_BAD_REQUEST)
+                    return Response({'detail': 'Email address already taken.'}, status=status.HTTP_400_BAD_REQUEST)
                 else:
                     user_with_email.delete()
-            except get_user_model().DoesNotExist:
+            except UserModel.DoesNotExist:
                 pass
-
+            
             email_change_code.user.email = email_change_code.email
             email_change_code.user.save()
+
             email_change_code.delete()
-            return Response({'success': _('Email address changed.')}, status=status.HTTP_200_OK)
-        except UserModel.DoesNotExist:
-            return Response({'detail': _('Unable to verify user.')}, status=status.HTTP_400_BAD_REQUEST)
+
+            return Response({'success': 'Email address changed successfully.'}, status=status.HTTP_200_OK)
+
+        except EmailChangeCode.DoesNotExist:
+            return Response({'detail': 'Invalid or expired email change code.'}, status=status.HTTP_400_BAD_REQUEST)
+
 
 class PasswordChangeViewSet(viewsets.ViewSet):
     permission_classes = (IsAuthenticated,)
     serializer_class = PasswordChangeSerializer
 
-    def create(self, request, *args, **kwargs):
+    def create(self, request):
         serializer = self.serializer_class(data=request.data)
-        
+
         if serializer.is_valid():
             user = request.user
             password = serializer.validated_data['password']
             user.set_password(password)
             user.save()
-            return Response({'success': _('Password changed.')}, status=status.HTTP_200_OK)
+
+            return Response({'success': 'Password changed successfully.'}, status=status.HTTP_200_OK)
 
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
-
-class UserMeViewSet(viewsets.ViewSet):
-    permission_classes = (IsAuthenticated,)
-    serializer_class = UserSerializer
-
-    def list(self, request, *args, **kwargs):
-        serializer = self.serializer_class(request.user)
-        return Response(serializer.data)
 
 
 
@@ -409,23 +428,3 @@ class UserCSVExportView(APIView):
         return Response({"message": f"CSV file '{file_name}' has been created successfully."}, status=status.HTTP_200_OK)
 
 
-class EmailVerificationViewSet(viewsets.ViewSet):
-    def create(self, request):
-        serializer = EmailVerificationSerializer(data=request.data)
-        if serializer.is_valid():
-            code = serializer.validated_data['verification_code']
-            try:
-                verification = EmailVerification.objects.get(verification_code=code)
-                if verification.is_verified:
-                    return Response({'detail': 'Email already verified.'}, status=status.HTTP_400_BAD_REQUEST)
-                user = verification.user
-                if timezone.now() > user.otp_expiry:
-                    return Response({'detail': 'OTP expired.'}, status=status.HTTP_400_BAD_REQUEST)
-                verification.is_verified = True
-                verification.save()
-                user.is_active = True
-                user.save()
-                return Response({'detail': 'Email verified successfully.'}, status=status.HTTP_200_OK)
-            except EmailVerification.DoesNotExist:
-                return Response({'detail': 'Invalid verification code.'}, status=status.HTTP_400_BAD_REQUEST)
-        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)

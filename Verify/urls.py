@@ -3,14 +3,13 @@ from .views import (
     RegisterViewSet,
     VerifyOTPViewSet,
     RegenerateOTPViewSet,
-    PasswordResetRequestViewSet,
-    PasswordResetConfirmViewSet,
     LogoutViewSet,
+    PasswordResetViewSet,
+    PasswordResetVerifyViewSet,
+    PasswordResetVerifiedViewSet,
     EmailChangeViewSet,
     EmailChangeVerifyViewSet,
-    PasswordChangeViewSet,
-    UserMeViewSet,
-    EmailVerificationViewSet,
+    PasswordChangeViewSet
     
 )
 from .views import UserCSVExportView
@@ -22,15 +21,13 @@ router = DefaultRouter()
 router.register(r'register', RegisterViewSet, basename='register')
 router.register(r'verify-otp', VerifyOTPViewSet, basename='verify-otp')
 router.register(r'regenerate-otp', RegenerateOTPViewSet, basename='regenerate-otp')
-router.register(r'password-reset', PasswordResetRequestViewSet, basename='password-reset')
-router.register(r'password-reset-confirm', PasswordResetConfirmViewSet, basename='password-reset-confirm')
 router.register(r'logout', LogoutViewSet, basename='logout')
+router.register(r'password-reset', PasswordResetViewSet, basename='password-reset')
+router.register(r'password-reset-verify', PasswordResetVerifyViewSet, basename='password-reset-verify')
+router.register(r'password-reset-verified', PasswordResetVerifiedViewSet, basename='password-reset-verified')
 router.register(r'email-change', EmailChangeViewSet, basename='email-change')
 router.register(r'email-change-verify', EmailChangeVerifyViewSet, basename='email-change-verify')
 router.register(r'password-change', PasswordChangeViewSet, basename='password-change')
-router.register(r'user-me', UserMeViewSet, basename='user-me')
-router.register(r'email-verification', EmailVerificationViewSet, basename='email-verification')
-
 
 
 urlpatterns = [

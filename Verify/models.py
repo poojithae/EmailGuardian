@@ -6,7 +6,14 @@ from django.contrib.auth.models import (
 )
 from django.core.validators import RegexValidator, validate_email
 from django.db import models
+from django.utils.translation import gettext_lazy as _
+from django.utils import timezone
+from django.core.mail import send_mail
+import random
+import string
+import uuid
 
+EXPIRY_PERIOD = 3
 
 
 phone_regex = RegexValidator(
@@ -14,26 +21,32 @@ phone_regex = RegexValidator(
     message="Phone number must be 10 digits only."
 )
 
+def generate_token():
+    return str(uuid.uuid4())
+
 class UserManager(BaseUserManager):
-    def create_user(self, email, password=None):
+    def _create_user(self, email, password, is_staff, is_superuser,
+                     is_verified, **extra_fields):
+        """
+        Creates and saves a User with a given email and password.
+        """
+        now = timezone.now()
         if not email:
-            raise ValueError("Users must have an email address")
-        
+            raise ValueError('Users must have an email address')
         email = self.normalize_email(email)
-        user = self.model(email=email)
+        user = self.model(email=email,
+                          is_staff=is_staff, is_active=True,
+                          is_superuser=is_superuser, is_verified=is_verified,
+                          last_login=now, date_joined=now, **extra_fields)
         user.set_password(password)
         user.save(using=self._db)
         return user
-
-    def create_superuser(self, email, password):
-        user = self.create_user(
-            email=email, password=password
-        )
-        user.is_active = True
-        user.is_staff = True
-        user.is_superuser = True
-        user.save(using=self._db)
-        return user
+    def create_user(self, email, password=None, **extra_fields):
+        return self._create_user(email, password, False, False, False,
+                                 **extra_fields)
+    def create_superuser(self, email, password, **extra_fields):
+        return self._create_user(email, password, True, True, True,
+                                 **extra_fields)
 
 class UserModel(AbstractBaseUser, PermissionsMixin):
     email = models.EmailField(
@@ -50,12 +63,14 @@ class UserModel(AbstractBaseUser, PermissionsMixin):
         validators=[phone_regex],
         db_index=True,
     )
-    username = models.CharField(max_length=30, blank=True, null=True)
+    first_name = models.CharField(_('first name'), max_length=30, blank=True)
+    last_name = models.CharField(_('last name'), max_length=30, blank=True)    
     otp = models.CharField(max_length=6, blank=True, null=True)
     otp_expiry = models.DateTimeField(blank=True, null=True)
     max_otp_try = models.CharField(max_length=2, default=settings.MAX_OTP_TRY)
     otp_max_out = models.DateTimeField(blank=True, null=True)
     is_active = models.BooleanField(default=False)
+    is_verified = models.BooleanField(_('verified'), default=False)
     is_staff = models.BooleanField(default=False)
     user_registered_at = models.DateTimeField(auto_now_add=True)
     reset_password_token = models.CharField(max_length=255, blank=True, null=True, unique=False)
@@ -63,48 +78,86 @@ class UserModel(AbstractBaseUser, PermissionsMixin):
     
     
     USERNAME_FIELD = "email"
+    REQUIRED_FIELDS = ['first_name', 'last_name']
     
 
     objects = UserManager()
 
+    def get_full_name(self):
+    
+        full_name = '%s %s' % (self.first_name, self.last_name)
+        return full_name.strip()
+
+    def get_short_name(self):
+        return self.first_name
+
     def __str__(self):
         return self.email
+    
+    def email_user(self, subject, message, from_email=None, **kwargs):
+        send_mail(subject, message, from_email, [self.email], **kwargs)
     
     class Meta:
         permissions = [
             ("view_user", "Can view user"),
         ]
-
-    class Meta:
         constraints = [
             models.UniqueConstraint(fields=['email'], name='unique_email'),
             models.UniqueConstraint(fields=['phone_number'], name='unique_phone_number'),
         ]
 
 
-class UserProfile(models.Model):
-    user = models.OneToOneField(
-        settings.AUTH_USER_MODEL,
-        on_delete=models.CASCADE,
-        primary_key=True,
-        null=False, blank=False,
-    )
-    first_name = models.CharField(max_length=50, null=False, blank=False)
-    last_name = models.CharField(max_length=50, null=False, blank=False)
-    address = models.TextField(null=False, blank=False)
-
-    def __str__(self):
-        return f"{self.first_name} {self.last_name}"
-
-class EmailVerification(models.Model):
-    user = models.OneToOneField(
-        settings.AUTH_USER_MODEL,
-        on_delete=models.CASCADE
-    )
-    verification_code = models.CharField(max_length=6)
-    is_verified = models.BooleanField(default=False)
+class AbstractBaseCode(models.Model):
+    user = models.ForeignKey(UserModel, on_delete=models.CASCADE, db_index=True)
+    token = models.UUIDField(default=uuid.uuid4, editable=False, unique=True)
     created_at = models.DateTimeField(auto_now_add=True)
 
+    class Meta:
+        abstract = True
+
+    
+    def send_email(self, subject, message):
+        
+        from_email = settings.EMAIL_FROM
+        send_mail(subject, message, from_email, [self.user.email])
+        
     def __str__(self):
-        return f"Verification for {self.user.email}"
+        return str(self.token)
+
+
+class PasswordResetCodeManager(models.Manager):
+    def create_password_reset_code(self, user):
+        token = generate_token()
+        password_reset_code = self.create(user=user, token=token)
+        
+        return password_reset_code
+    
+    def get_expiry_period(self):
+        return EXPIRY_PERIOD
+
+class EmailChangeCodeManager(models.Manager):
+    def create_email_change_code(self, user, email):
+        token = generate_token()
+        email_change_code = self.create(user=user, token=token, email=email)
+        return email_change_code
+    
+    def get_expiry_period(self):
+        return EXPIRY_PERIOD
+    
+class PasswordResetCode(AbstractBaseCode):
+    objects = PasswordResetCodeManager()
+
+class EmailChangeCode(AbstractBaseCode):
+    email = models.EmailField(_('email address'), max_length=255)
+
+    objects = EmailChangeCodeManager()
+
+
+
+
+
+
+
+
+
 
